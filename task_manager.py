@@ -4,6 +4,8 @@ import time
 from typing import List, Optional
 from fastapi import WebSocket
 import httpx
+from collections import deque
+import traceback
 from emby_client import EmbyClient
 from config import load_config
 
@@ -16,11 +18,27 @@ class ConnectionManager:
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
         self.active_connections.append(websocket)
+        # Send buffered logs to new connections
+        try:
+            from task_manager import task_manager  # local import to avoid circular
+            for msg in task_manager.log_buffer:
+                try:
+                    await websocket.send_text(msg)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def disconnect(self, websocket: WebSocket):
         self.active_connections.remove(websocket)
 
     async def broadcast(self, message: str):
+        # Append to buffer
+        try:
+            from task_manager import task_manager  # local import to avoid circular
+            task_manager.log_buffer.append(message)
+        except Exception:
+            pass
         for connection in self.active_connections:
             try:
                 await connection.send_text(message)
@@ -34,6 +52,9 @@ class TaskManager:
         self.is_running = False
         self.should_stop = False
         self.current_task: Optional[asyncio.Task] = None
+        self.current_library_id: Optional[str] = None
+        self.stats = {"total": 0, "processed": 0, "success": 0}
+        self.log_buffer = deque(maxlen=2000)
 
     async def start_task(self, library_id: str):
         if self.is_running:
@@ -41,6 +62,8 @@ class TaskManager:
         
         self.should_stop = False
         self.is_running = True
+        self.current_library_id = library_id
+        self.stats = {"total": 0, "processed": 0, "success": 0}
         self.current_task = asyncio.create_task(self._process_library(library_id))
         return True, "Task started"
 
@@ -86,18 +109,21 @@ class TaskManager:
             for item in all_items:
                 path = item.get('Path', '').lower()
                 media_streams = item.get('MediaStreams', [])
+                name = item.get('Name', 'Unknown')
                 
                 if not path.endswith('.strm'):
                     continue
                     
                 if media_streams and len(media_streams) > 0:
                     skipped_count += 1
+                    logger.info(f"[跳过] {name} 已包含元数据")
                     continue
                     
                 pending_items.append(item)
             
             total_found = len(all_items)
             total_strm_todo = len(pending_items)
+            self.stats["total"] = total_strm_todo
             
             await manager.broadcast(f"扫描完成: 共发现 {total_found} 个项目。")
             await manager.broadcast(f"智能过滤: {skipped_count} 个 .strm 文件已有媒体信息，无需修复。")
@@ -114,6 +140,7 @@ class TaskManager:
                 items = pending_items[:batch_size]
                 await manager.broadcast(f"配置限制: 仅处理前 {batch_size} 个文件 (剩余 {total_strm_todo - batch_size} 个将在下次处理)。")
                 total_strm_todo = batch_size
+                self.stats["total"] = batch_size
 
             await manager.broadcast("准备开始修复任务...")
 
@@ -124,6 +151,7 @@ class TaskManager:
 
                 name = item.get('Name', 'Unknown')
                 item_id = item.get('Id')
+                logger.info(f"[探测] 正在处理: {name} (ID: {item_id})...")
                 
                 await manager.broadcast(f"[{index + 1}/{total_strm_todo}] 正在探测: {name}...")
                 
@@ -160,6 +188,9 @@ class TaskManager:
                             minutes = int((total_seconds % 3600) // 60)
                             if hours > 0: duration_str = f" | {hours}h {minutes}m"
                             else: duration_str = f" | {minutes}m"
+                        
+                        logger.info(f"[成功] {name} 获取到信息: {res_str} {codec}{duration_str}")
+                        self.stats["success"] += 1
                             
                         await manager.broadcast(f"[{index + 1}/{total_strm_todo}] 成功: {name} ({res_str} {codec}{duration_str})")
                     else:
@@ -176,6 +207,8 @@ class TaskManager:
                         await manager.broadcast(f"[{index + 1}/{total_strm_todo}] 失败: {name} (HTTP {e.response.status_code})")
                 except Exception as e:
                     await manager.broadcast(f"[{index + 1}/{total_strm_todo}] 异常: {name} ({str(e)})")
+                finally:
+                    self.stats["processed"] += 1
 
                 # Sleep logic with interruption check
                 sleep_time = config.scan_interval
@@ -193,7 +226,7 @@ class TaskManager:
 
         except Exception as e:
             await manager.broadcast(f"系统错误: {str(e)}")
-            logger.error(f"Task error: {traceback.format_exc()}")
+            logger.error(traceback.format_exc())
         finally:
             self.is_running = False
             self.current_task = None

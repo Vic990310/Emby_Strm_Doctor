@@ -6,14 +6,30 @@ from pydantic import BaseModel
 import uvicorn
 import logging
 import os
+import traceback
+from logging.handlers import RotatingFileHandler
 
 from config import load_config, save_config, AppConfig
 from emby_client import EmbyClient
 from task_manager import task_manager, manager
 
 # Logging setup
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+os.makedirs("data", exist_ok=True)
+formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+file_handler = RotatingFileHandler("data/app.log", maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8")
+file_handler.setFormatter(formatter)
+stream_handler = logging.StreamHandler()
+stream_handler.setFormatter(formatter)
+
+# Root/app logger
+logging.basicConfig(level=logging.INFO, handlers=[file_handler, stream_handler])
+logger = logging.getLogger("app")
+
+# Reduce noise from libraries
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("uvicorn").setLevel(logging.WARNING)
+logging.getLogger("uvicorn.error").setLevel(logging.WARNING)
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 
 app = FastAPI(title="Emby Strm Doctor")
 
@@ -47,8 +63,16 @@ async def get_libraries():
         libraries = await client.get_libraries()
         return libraries
     except Exception as e:
-        logger.error(f"Error fetching libraries: {traceback.format_exc()}")
+        logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/status")
+async def get_status():
+    return {
+        "is_running": task_manager.is_running,
+        "current_library_id": getattr(task_manager, "current_library_id", None),
+        "statistics": getattr(task_manager, "stats", {"total": 0, "processed": 0, "success": 0}),
+    }
 
 @app.post("/api/start")
 async def start_task(req: LibraryRequest):

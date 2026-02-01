@@ -146,6 +146,7 @@
         document.addEventListener('DOMContentLoaded', async () => {
             await loadConfig();
             await loadLibraries();
+            await loadStatus();
             initWebSocket();
         });
 
@@ -267,6 +268,24 @@
                 btnStop.classList.remove('opacity-50', 'cursor-not-allowed');
             }
         });
+
+        async function loadStatus() {
+            try {
+                const res = await fetch(`${API_BASE}/status`);
+                if (!res.ok) return;
+                const data = await res.json();
+                if (data.is_running) {
+                    setRunningState(true);
+                    if (data.current_library_id) {
+                        librarySelect.value = data.current_library_id;
+                    }
+                } else {
+                    setRunningState(false);
+                }
+            } catch (e) {
+                console.warn('Status fetch failed', e);
+            }
+        }
 
         function setRunningState(isRunning) {
             btnStart.disabled = isRunning;
