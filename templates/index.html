@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Emby Strm Doctor</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        emby: '#52B54B',
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        /* Custom scrollbar for logs */
+        #log-container::-webkit-scrollbar {
+            width: 8px;
+        }
+        #log-container::-webkit-scrollbar-track {
+            background: #1f2937; 
+        }
+        #log-container::-webkit-scrollbar-thumb {
+            background: #4b5563; 
+            border-radius: 4px;
+        }
+        #log-container::-webkit-scrollbar-thumb:hover {
+            background: #6b7280; 
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100 font-sans min-h-screen flex flex-col">
+
+    <!-- Header -->
+    <header class="bg-gray-800 border-b border-gray-700 p-4 shadow-lg">
+        <div class="container mx-auto flex justify-between items-center">
+            <h1 class="text-2xl font-bold flex items-center gap-2">
+                <span class="text-emby">Emby</span> Strm Doctor
+            </h1>
+            <div class="text-sm text-gray-400">v1.0</div>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="container mx-auto p-4 flex-grow flex flex-col md:flex-row gap-6">
+        
+        <!-- Sidebar / Settings -->
+        <aside class="w-full md:w-1/3 lg:w-1/4 space-y-6">
+            <div class="bg-gray-800 rounded-lg p-6 shadow-lg border border-gray-700">
+                <h2 class="text-xl font-semibold mb-4 text-emby border-b border-gray-700 pb-2">设置 (Settings)</h2>
+                <form id="settings-form" class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-300 mb-1">Emby Host</label>
+                        <input type="text" id="emby_host" placeholder="http://localhost:8096" class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 focus:outline-none focus:border-emby text-white placeholder-gray-500">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-300 mb-1">API Key</label>
+                        <input type="password" id="api_key" placeholder="Enter API Key" class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 focus:outline-none focus:border-emby text-white placeholder-gray-500">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-300 mb-1">User ID</label>
+                        <input type="text" id="user_id" placeholder="Enter User ID" class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 focus:outline-none focus:border-emby text-white placeholder-gray-500">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-300 mb-1">安全请求间隔 (秒)</label>
+                        <input type="number" id="scan_interval" min="1" value="5" class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 focus:outline-none focus:border-emby text-white">
+                        <p class="text-xs text-yellow-500 mt-1">
+                            ⚠️ 警告：针对 115/阿里云盘/Google Drive 等挂载盘用户，建议设置 5 秒以上，过快会导致触发网盘 API 风控（Ban IP/Token）。
+                        </p>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-300 mb-1">单次任务扫描数量限制 (0 为不限)</label>
+                        <input type="number" id="batch_size" min="0" value="0" class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 focus:outline-none focus:border-emby text-white">
+                        <p class="text-xs text-gray-400 mt-1">
+                            设置每次任务最多扫描的文件数，防止任务运行时间过长。
+                        </p>
+                    </div>
+                    <button type="submit" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded transition duration-200">
+                        保存配置
+                    </button>
+                </form>
+            </div>
+        </aside>
+
+        <!-- Dashboard -->
+        <section class="w-full md:w-2/3 lg:w-3/4 space-y-6">
+            
+            <!-- Controls -->
+            <div class="bg-gray-800 rounded-lg p-6 shadow-lg border border-gray-700">
+                <h2 class="text-xl font-semibold mb-4 text-emby border-b border-gray-700 pb-2">任务面板 (Dashboard)</h2>
+                
+                <div class="flex flex-col sm:flex-row gap-4 items-end">
+                    <div class="w-full sm:w-1/2">
+                        <label class="block text-sm font-medium text-gray-300 mb-1">选择媒体库</label>
+                        <select id="library-select" class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 focus:outline-none focus:border-emby text-white">
+                            <option value="">加载中...</option>
+                        </select>
+                    </div>
+                    <div class="flex gap-2 w-full sm:w-auto">
+                        <button id="btn-refresh-libs" class="bg-gray-600 hover:bg-gray-500 text-white px-3 py-2 rounded" title="刷新列表">
+                            🔄
+                        </button>
+                        <button id="btn-start" class="flex-1 sm:flex-none bg-emby hover:bg-green-600 text-white font-bold py-2 px-6 rounded transition duration-200 disabled:opacity-50 disabled:cursor-not-allowed">
+                            开始修复
+                        </button>
+                        <button id="btn-stop" class="flex-1 sm:flex-none bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-6 rounded transition duration-200 disabled:opacity-50 disabled:cursor-not-allowed" disabled>
+                            停止
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Logs -->
+            <div class="bg-gray-800 rounded-lg p-6 shadow-lg border border-gray-700 flex flex-col h-[500px]">
+                <div class="flex justify-between items-center mb-4 border-b border-gray-700 pb-2">
+                    <h2 class="text-xl font-semibold text-gray-200">实时日志</h2>
+                    <button id="btn-clear-logs" class="text-xs text-gray-400 hover:text-white">清空日志</button>
+                </div>
+                <div id="log-container" class="flex-1 overflow-y-auto font-mono text-sm space-y-1 p-2 bg-gray-900 rounded border border-gray-700">
+                    <div class="text-gray-500 italic">等待任务开始...</div>
+                </div>
+            </div>
+
+        </section>
+    </main>
+
+    <script>
+        const API_BASE = '/api';
+        let ws;
+
+        // Elements
+        const settingsForm = document.getElementById('settings-form');
+        const librarySelect = document.getElementById('library-select');
+        const btnStart = document.getElementById('btn-start');
+        const btnStop = document.getElementById('btn-stop');
+        const btnRefreshLibs = document.getElementById('btn-refresh-libs');
+        const logContainer = document.getElementById('log-container');
+        const btnClearLogs = document.getElementById('btn-clear-logs');
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', async () => {
+            await loadConfig();
+            await loadLibraries();
+            initWebSocket();
+        });
+
+        // Config Logic
+        async function loadConfig() {
+            try {
+                const res = await fetch(`${API_BASE}/config`);
+                const data = await res.json();
+                document.getElementById('emby_host').value = data.emby_host;
+                document.getElementById('api_key').value = data.api_key;
+                document.getElementById('user_id').value = data.user_id;
+                document.getElementById('scan_interval').value = data.scan_interval;
+                document.getElementById('batch_size').value = data.batch_size || 0;
+            } catch (e) {
+                console.error('Failed to load config', e);
+            }
+        }
+
+        settingsForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const config = {
+                emby_host: document.getElementById('emby_host').value,
+                api_key: document.getElementById('api_key').value,
+                user_id: document.getElementById('user_id').value,
+                scan_interval: parseInt(document.getElementById('scan_interval').value),
+                batch_size: parseInt(document.getElementById('batch_size').value)
+            };
+            
+            try {
+                const res = await fetch(`${API_BASE}/config`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(config)
+                });
+                if (res.ok) {
+                    alert('配置已保存');
+                    loadLibraries(); // Refresh libraries with new config
+                } else {
+                    alert('保存失败');
+                }
+            } catch (e) {
+                console.error(e);
+                alert('保存出错');
+            }
+        });
+
+        // Libraries Logic
+        async function loadLibraries() {
+            librarySelect.innerHTML = '<option>加载中...</option>';
+            try {
+                const res = await fetch(`${API_BASE}/libraries`);
+                if (!res.ok) throw new Error('Failed to fetch libraries');
+                const items = await res.json();
+                
+                librarySelect.innerHTML = '';
+                if (items.length === 0) {
+                    librarySelect.innerHTML = '<option value="">未找到媒体库</option>';
+                    return;
+                }
+                
+                items.forEach(lib => {
+                    const opt = document.createElement('option');
+                    opt.value = lib.Id;
+                    opt.textContent = lib.Name;
+                    librarySelect.appendChild(opt);
+                });
+            } catch (e) {
+                console.error(e);
+                librarySelect.innerHTML = '<option value="">加载失败 (请检查配置)</option>';
+            }
+        }
+
+        btnRefreshLibs.addEventListener('click', loadLibraries);
+
+        // Task Control
+        btnStart.addEventListener('click', async () => {
+            const libraryId = librarySelect.value;
+            if (!libraryId) return alert('请选择一个媒体库');
+
+            try {
+                const res = await fetch(`${API_BASE}/start`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ library_id: libraryId })
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    setRunningState(true);
+                    appendLog('>>> 任务启动指令已发送');
+                } else {
+                    alert(data.detail || '启动失败');
+                }
+            } catch (e) {
+                alert('启动请求出错');
+            }
+        });
+
+        btnStop.addEventListener('click', async () => {
+            try {
+                // UI feedback
+                btnStop.disabled = true;
+                btnStop.textContent = '正在停止...';
+                btnStop.classList.add('opacity-50', 'cursor-not-allowed');
+
+                const res = await fetch(`${API_BASE}/stop`, { method: 'POST' });
+                if (res.ok) {
+                    appendLog('>>> 停止指令已发送');
+                } else {
+                    // Revert UI if request failed
+                    btnStop.disabled = false;
+                    btnStop.textContent = '停止';
+                    btnStop.classList.remove('opacity-50', 'cursor-not-allowed');
+                }
+            } catch (e) {
+                console.error(e);
+                // Revert UI if request failed
+                btnStop.disabled = false;
+                btnStop.textContent = '停止';
+                btnStop.classList.remove('opacity-50', 'cursor-not-allowed');
+            }
+        });
+
+        function setRunningState(isRunning) {
+            btnStart.disabled = isRunning;
+            
+            // Reset Stop Button State
+            btnStop.textContent = '停止';
+            btnStop.disabled = !isRunning;
+            
+            if (isRunning) {
+                btnStart.classList.add('opacity-50', 'cursor-not-allowed');
+                btnStop.classList.remove('opacity-50', 'cursor-not-allowed');
+            } else {
+                btnStart.classList.remove('opacity-50', 'cursor-not-allowed');
+                btnStop.classList.add('opacity-50', 'cursor-not-allowed');
+            }
+        }
+
+        // WebSocket & Logs
+        function initWebSocket() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+            
+            ws.onmessage = (event) => {
+                const msg = event.data;
+                appendLog(msg);
+                
+                if (msg.includes('任务完成') || msg.includes('任务已手动停止') || msg.includes('任务自动停止') || msg.includes('用户已手动终止任务') || msg.includes('身份验证失败') || msg.includes('身份验证异常')) {
+                    setRunningState(false);
+                }
+            };
+
+            ws.onclose = () => {
+                console.log('WS Disconnected, retrying in 3s...');
+                setTimeout(initWebSocket, 3000);
+            };
+        }
+
+        function appendLog(text) {
+            const div = document.createElement('div');
+            // Timestamp
+            const time = new Date().toLocaleTimeString();
+            
+            // Color coding based on content
+            let colorClass = 'text-gray-300';
+            if (text.includes('成功')) colorClass = 'text-green-400';
+            else if (text.includes('失败') || text.includes('错误') || text.includes('异常') || text.includes('身份验证失败')) colorClass = 'text-red-400';
+            else if (text.includes('警告')) colorClass = 'text-yellow-400';
+            else if (text.includes('正在') || text.includes('身份确认')) colorClass = 'text-blue-300';
+
+            div.className = `${colorClass} break-all`;
+            
+            // Check if text contains HTML tags (simple check)
+            if (text.trim().startsWith('<')) {
+                 div.innerHTML = `<span class="text-gray-600 select-none">[${time}]</span> ${text}`;
+            } else {
+                 div.innerHTML = `<span class="text-gray-600 select-none">[${time}]</span> ${text}`;
+            }
+            
+            logContainer.appendChild(div);
+            logContainer.scrollTop = logContainer.scrollHeight;
+        }
+
+        btnClearLogs.addEventListener('click', () => {
+            logContainer.innerHTML = '';
+        });
+
+    </script>
+</body>
+</html>

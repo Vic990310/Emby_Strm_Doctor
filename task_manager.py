@@ -1,0 +1,201 @@
+import asyncio
+import logging
+import time
+from typing import List, Optional
+from fastapi import WebSocket
+import httpx
+from emby_client import EmbyClient
+from config import load_config
+
+logger = logging.getLogger(__name__)
+
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: str):
+        for connection in self.active_connections:
+            try:
+                await connection.send_text(message)
+            except Exception:
+                pass
+
+manager = ConnectionManager()
+
+class TaskManager:
+    def __init__(self):
+        self.is_running = False
+        self.should_stop = False
+        self.current_task: Optional[asyncio.Task] = None
+
+    async def start_task(self, library_id: str):
+        if self.is_running:
+            return False, "Task already running"
+        
+        self.should_stop = False
+        self.is_running = True
+        self.current_task = asyncio.create_task(self._process_library(library_id))
+        return True, "Task started"
+
+    async def stop_task(self):
+        if not self.is_running:
+            return False, "No task running"
+        
+        self.should_stop = True
+        if self.current_task:
+            await self.current_task
+        return True, "Task stopped"
+
+    async def _process_library(self, library_id: str):
+        config = load_config()
+        client = EmbyClient(config.emby_host, config.api_key, config.user_id)
+        
+        try:
+            # 1. Identity Pre-check
+            await manager.broadcast("[系统] 正在验证身份...")
+            try:
+                user_info = await client.get_user_info()
+                user_name = user_info.get("Name", "Unknown")
+                user_id_check = user_info.get("Id", "Unknown")
+                await manager.broadcast(f"[系统] 身份确认: 当前操作用户为 <strong>{user_name}</strong> (ID: {user_id_check})")
+            except httpx.HTTPStatusError as e:
+                error_body = e.response.text
+                await manager.broadcast(f"[系统] 身份验证失败: HTTP {e.response.status_code}")
+                await manager.broadcast(f"<pre class='text-xs bg-gray-800 p-2 rounded mt-1'>{error_body}</pre>")
+                return
+            except Exception as e:
+                await manager.broadcast(f"[系统] 身份验证异常: {str(e)}")
+                return
+
+            await manager.broadcast("正在获取媒体库项目...")
+            all_items = await client.get_items(library_id)
+            
+            # Smart Filtering:
+            # 1. Must be .strm file
+            # 2. Must NOT have valid MediaStreams (if it has streams, it's already good)
+            pending_items = []
+            skipped_count = 0
+            
+            for item in all_items:
+                path = item.get('Path', '').lower()
+                media_streams = item.get('MediaStreams', [])
+                
+                if not path.endswith('.strm'):
+                    continue
+                    
+                if media_streams and len(media_streams) > 0:
+                    skipped_count += 1
+                    continue
+                    
+                pending_items.append(item)
+            
+            total_found = len(all_items)
+            total_strm_todo = len(pending_items)
+            
+            await manager.broadcast(f"扫描完成: 共发现 {total_found} 个项目。")
+            await manager.broadcast(f"智能过滤: {skipped_count} 个 .strm 文件已有媒体信息，无需修复。")
+            await manager.broadcast(f"待修复队列: {total_strm_todo} 个文件。")
+            
+            if total_strm_todo == 0:
+                 await manager.broadcast("所有 .strm 文件均正常，任务结束。")
+                 return
+
+            # Apply batch size limit
+            batch_size = config.batch_size
+            items = pending_items
+            if batch_size > 0 and total_strm_todo > batch_size:
+                items = pending_items[:batch_size]
+                await manager.broadcast(f"配置限制: 仅处理前 {batch_size} 个文件 (剩余 {total_strm_todo - batch_size} 个将在下次处理)。")
+                total_strm_todo = batch_size
+
+            await manager.broadcast("准备开始修复任务...")
+
+            for index, item in enumerate(items):
+                if self.should_stop:
+                    await manager.broadcast("[系统] 用户已手动终止任务")
+                    break
+
+                name = item.get('Name', 'Unknown')
+                item_id = item.get('Id')
+                
+                await manager.broadcast(f"[{index + 1}/{total_strm_todo}] 正在探测: {name}...")
+                
+                try:
+                    # 1. Low Bitrate Trick (Force Probe)
+                    await client.refresh_item(item_id)
+                    
+                    # 2. Post-Check Verification (Wait & Verify)
+                    # Wait for Emby to process the probe result (DB write)
+                    await asyncio.sleep(2) 
+                    
+                    updated_item = await client.get_item_details(item_id)
+                    media_streams = updated_item.get('MediaStreams', [])
+                    
+                    if media_streams and len(media_streams) > 0:
+                        # Extract rich info for logging
+                        video_stream = next((s for s in media_streams if s.get('Type') == 'Video'), {})
+                        width = video_stream.get('Width')
+                        height = video_stream.get('Height')
+                        codec = video_stream.get('Codec', 'Unknown').upper()
+                        
+                        # Format resolution (e.g., 3840x2160 -> 4K)
+                        res_str = f"{width}x{height}"
+                        if width and width >= 3800: res_str = "4K"
+                        elif width and width >= 1900: res_str = "1080p"
+                        elif width and width >= 1200: res_str = "720p"
+                        
+                        # Format duration
+                        run_ticks = updated_item.get('RunTimeTicks', 0)
+                        duration_str = ""
+                        if run_ticks:
+                            total_seconds = run_ticks / 10000000
+                            hours = int(total_seconds // 3600)
+                            minutes = int((total_seconds % 3600) // 60)
+                            if hours > 0: duration_str = f" | {hours}h {minutes}m"
+                            else: duration_str = f" | {minutes}m"
+                            
+                        await manager.broadcast(f"[{index + 1}/{total_strm_todo}] 成功: {name} ({res_str} {codec}{duration_str})")
+                    else:
+                        await manager.broadcast(f"[{index + 1}/{total_strm_todo}] 失败: {name} - Emby 无法读取文件头 (可能是坏链或网盘超时)")
+                        
+                except httpx.HTTPStatusError as e:
+                    if e.response.status_code in [403, 429]:
+                        await manager.broadcast(f"错误: {e.response.status_code} - 可能触发风控，任务自动停止！")
+                        if e.response.status_code == 403:
+                             await manager.broadcast(f"<pre class='text-xs bg-gray-800 p-2 rounded mt-1'>{e.response.text}</pre>")
+                        logger.error(f"Rate limit or Forbidden hit: {e}")
+                        break
+                    else:
+                        await manager.broadcast(f"[{index + 1}/{total_strm_todo}] 失败: {name} (HTTP {e.response.status_code})")
+                except Exception as e:
+                    await manager.broadcast(f"[{index + 1}/{total_strm_todo}] 异常: {name} ({str(e)})")
+
+                # Sleep logic with interruption check
+                sleep_time = config.scan_interval
+                for _ in range(sleep_time):
+                    if self.should_stop:
+                        break
+                    await asyncio.sleep(1)
+                
+                if self.should_stop:
+                    await manager.broadcast("[系统] 用户已手动终止任务")
+                    break
+            
+            if not self.should_stop:
+                await manager.broadcast("任务完成！")
+
+        except Exception as e:
+            await manager.broadcast(f"系统错误: {str(e)}")
+            logger.error(f"Task error: {traceback.format_exc()}")
+        finally:
+            self.is_running = False
+            self.current_task = None
+
+task_manager = TaskManager()
