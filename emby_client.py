@@ -16,6 +16,7 @@ class EmbyClient:
     async def validate_connection(self):
         url = f"{self.host}/System/Info"
         async with httpx.AsyncClient() as client:
+            logger.info(f"验证连接 [GET]: {url}")
             resp = await client.get(url, headers=self.headers, timeout=10.0)
             resp.raise_for_status()
             return True
@@ -32,6 +33,7 @@ class EmbyClient:
         """Get all media libraries."""
         url = f"{self.host}/Users/{self.user_id}/Views"
         async with httpx.AsyncClient() as client:
+            logger.info(f"获取媒体库 [GET]: {url}")
             resp = await client.get(url, headers=self.headers, timeout=10.0)
             resp.raise_for_status()
             return resp.json().get("Items", [])
@@ -50,6 +52,7 @@ class EmbyClient:
         }
         logger.debug(f"Fetching items from {url} with params: {params}")
         async with httpx.AsyncClient() as client:
+            logger.info(f"正在获取列表 [GET]: {url} | 参数: {params}")
             resp = await client.get(url, headers=self.headers, params=params, timeout=60.0)
             resp.raise_for_status()
             return resp.json().get("Items", [])
@@ -77,6 +80,7 @@ class EmbyClient:
         
         logger.debug(f"Refreshing item {item_id} via {url} with data: {data}")
         async with httpx.AsyncClient() as client:
+            logger.info(f"触发探测 [POST]: {url} | 码率限制: {data.get('MaxStreamingBitrate')}")
             resp = await client.post(url, headers=self.headers, json=data, timeout=60.0)
             resp.raise_for_status()
             return True
