@@ -112,6 +112,7 @@ class TaskManager:
             total_found = 0
             loaded_count = 0
             last_reported = 0
+            limit_reached = False
             async for batch in client.get_items(library_id, None if full_mode else last_sync):
                 total_found += len(batch)
                 loaded_count += len(batch)
@@ -146,6 +147,11 @@ class TaskManager:
                     if status_row and status_row.get("status") == "failed" and int(status_row.get("retry_count") or 0) >= 3 and (not force):
                         continue
                     pending_items.append(item)
+                    if config.batch_size > 0 and len(pending_items) >= config.batch_size:
+                        limit_reached = True
+                        break
+                if limit_reached:
+                    break
             pending_total = len(pending_items)
             total_strm_todo = pending_total
             self.stats["total"] = total_strm_todo
@@ -165,13 +171,9 @@ class TaskManager:
             # Apply batch size limit
             batch_size = config.batch_size
             items = pending_items
-            limited = False
-            if batch_size > 0 and pending_total > batch_size:
-                items = pending_items[:batch_size]
-                limited = True
-                await manager.broadcast(f"配置限制: 仅处理前 {batch_size} 个文件 (剩余 {pending_total - batch_size} 个将在下次处理)。")
-                total_strm_todo = batch_size
-                self.stats["total"] = batch_size
+            limited = limit_reached
+            if limited:
+                await manager.broadcast(f"配置限制: 达到批量上限，仅处理前 {len(items)} 个文件。")
 
             await manager.broadcast("准备开始修复任务...")
 
