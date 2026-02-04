@@ -110,8 +110,14 @@ class TaskManager:
             pending_items = []
             skipped_count = 0
             total_found = 0
+            loaded_count = 0
+            last_reported = 0
             async for batch in client.get_items(library_id, None if full_mode else last_sync):
                 total_found += len(batch)
+                loaded_count += len(batch)
+                if loaded_count - last_reported >= 1000:
+                    await manager.broadcast(f"[扫描] 已加载 {loaded_count} 个项目...")
+                    last_reported = loaded_count
                 for item in batch:
                     path = item.get("Path", "") or ""
                     name = item.get("Name", "Unknown")
@@ -140,7 +146,8 @@ class TaskManager:
                     if status_row and status_row.get("status") == "failed" and int(status_row.get("retry_count") or 0) >= 3 and (not force):
                         continue
                     pending_items.append(item)
-            total_strm_todo = len(pending_items)
+            pending_total = len(pending_items)
+            total_strm_todo = pending_total
             self.stats["total"] = total_strm_todo
             await manager.broadcast(f"扫描完成: 共发现 {total_found} 个项目。")
             await manager.broadcast(f"智能过滤: {skipped_count} 个 .strm 文件已有媒体信息或被黑名单忽略。")
@@ -158,14 +165,17 @@ class TaskManager:
             # Apply batch size limit
             batch_size = config.batch_size
             items = pending_items
-            if batch_size > 0 and total_strm_todo > batch_size:
+            limited = False
+            if batch_size > 0 and pending_total > batch_size:
                 items = pending_items[:batch_size]
-                await manager.broadcast(f"配置限制: 仅处理前 {batch_size} 个文件 (剩余 {total_strm_todo - batch_size} 个将在下次处理)。")
+                limited = True
+                await manager.broadcast(f"配置限制: 仅处理前 {batch_size} 个文件 (剩余 {pending_total - batch_size} 个将在下次处理)。")
                 total_strm_todo = batch_size
                 self.stats["total"] = batch_size
 
             await manager.broadcast("准备开始修复任务...")
 
+            processed_local = 0
             for index, item in enumerate(items):
                 if self.should_stop:
                     await manager.broadcast("[系统] 用户已手动终止任务")
@@ -235,6 +245,7 @@ class TaskManager:
                     self.db.set_media_status(item_id, name, item.get("Path", ""), "failed", None, True)
                 finally:
                     self.stats["processed"] += 1
+                    processed_local += 1
 
                 # Sleep logic with interruption check
                 sleep_time = config.scan_interval
@@ -249,12 +260,16 @@ class TaskManager:
             
             if not self.should_stop:
                 await manager.broadcast("任务完成！")
-                if full_mode:
-                    db_ids = set(self.db.get_all_ids())
-                    missing = list(db_ids - scanned_ids)
-                    removed = self.db.delete_ids(missing)
-                    await manager.broadcast(f"[清理] 发现 {removed} 个已删除项目，已从数据库移除")
-                self.db.set_config("last_sync_time", datetime.datetime.utcnow().isoformat() + "Z")
+                processed_all = (not limited) and (processed_local == pending_total)
+                if processed_all:
+                    if full_mode:
+                        db_ids = set(self.db.get_all_ids())
+                        missing = list(db_ids - scanned_ids)
+                        removed = self.db.delete_ids(missing)
+                        await manager.broadcast(f"[清理] 发现 {removed} 个已删除项目，已从数据库移除")
+                    self.db.set_config("last_sync_time", datetime.datetime.utcnow().isoformat() + "Z")
+                else:
+                    await manager.broadcast("[提示] 本次未完成全部待修复队列，未更新增量时间戳")
 
         except Exception as e:
             await manager.broadcast(f"系统错误: {str(e)}")

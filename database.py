@@ -75,10 +75,15 @@ class Database:
         if not ids:
             return 0
         cur = self.conn.cursor()
-        placeholders = ",".join(["?"] * len(ids))
-        cur.execute(f"DELETE FROM media_status WHERE emby_id IN ({placeholders})", ids)
+        total = 0
+        batch_size = 900
+        for i in range(0, len(ids), batch_size):
+            chunk = ids[i : i + batch_size]
+            placeholders = ",".join(["?"] * len(chunk))
+            cur.execute(f"DELETE FROM media_status WHERE emby_id IN ({placeholders})", chunk)
+            total += cur.rowcount
         self.conn.commit()
-        return cur.rowcount
+        return total
 
     def get_stats(self) -> Dict[str, int]:
         cur = self.conn.cursor()
