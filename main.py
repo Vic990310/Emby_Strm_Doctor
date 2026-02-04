@@ -12,6 +12,7 @@ from logging.handlers import RotatingFileHandler
 from config import load_config, save_config, AppConfig
 from emby_client import EmbyClient
 from task_manager import task_manager, manager
+from database import Database
 
 # Logging setup
 os.makedirs("data", exist_ok=True)
@@ -36,8 +37,9 @@ app = FastAPI(title="Emby Strm Doctor")
 # Create templates directory if not exists (handled by mkdir)
 templates = Jinja2Templates(directory="templates")
 
-class LibraryRequest(BaseModel):
+class StartRequest(BaseModel):
     library_id: str
+    force: bool = False
 
 @app.get("/", response_class=HTMLResponse)
 async def read_root(request: Request):
@@ -68,15 +70,17 @@ async def get_libraries():
 
 @app.get("/api/status")
 async def get_status():
+    db = Database()
     return {
         "is_running": task_manager.is_running,
         "current_library_id": getattr(task_manager, "current_library_id", None),
         "statistics": getattr(task_manager, "stats", {"total": 0, "processed": 0, "success": 0}),
+        "db_stats": db.get_stats(),
     }
 
 @app.post("/api/start")
-async def start_task(req: LibraryRequest):
-    success, msg = await task_manager.start_task(req.library_id)
+async def start_task(req: StartRequest):
+    success, msg = await task_manager.start_task(req.library_id, req.force)
     if not success:
         raise HTTPException(status_code=400, detail=msg)
     return {"status": "success", "message": msg}

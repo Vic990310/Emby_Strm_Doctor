@@ -11,6 +11,7 @@ class AppConfig(BaseModel):
     user_id: str = ""
     scan_interval: int = 5
     batch_size: int = 0  # 0 means unlimited
+    exclude_paths: str = ""
 
     class Config:
         json_schema_extra = {
@@ -19,7 +20,8 @@ class AppConfig(BaseModel):
                 "api_key": "your_api_key",
                 "user_id": "your_user_id",
                 "scan_interval": 5,
-                "batch_size": 0
+                "batch_size": 0,
+                "exclude_paths": "/mnt/user/115/\n/mnt/user/aliyun/"
             }
         }
 

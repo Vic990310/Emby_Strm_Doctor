@@ -38,24 +38,31 @@ class EmbyClient:
             resp.raise_for_status()
             return resp.json().get("Items", [])
 
-    async def get_items(self, parent_id: str):
-        """Recursively get all items (Video/Audio) from a library."""
-        # Note: Depending on library size, we might want to paginate or use specific filters.
-        # For simplicity, we'll fetch all items that are likely to be strm files (Movies, Episodes).
-        # We filter by 'Video' and 'Audio' types.
+    async def get_items(self, parent_id: str, min_date_last_saved: str = None):
         url = f"{self.host}/Users/{self.user_id}/Items"
-        params = {
-            "ParentId": parent_id,
-            "Recursive": "true",
-            "IncludeItemTypes": "Movie,Episode,Audio",
-            "Fields": "Path,MediaStreams,ProviderIds", 
-        }
-        logger.debug(f"Fetching items from {url} with params: {params}")
+        start_index = 0
+        limit = 500
         async with httpx.AsyncClient() as client:
-            logger.info(f"正在获取列表 [GET]: {url} | 参数: {params}")
-            resp = await client.get(url, headers=self.headers, params=params, timeout=60.0)
-            resp.raise_for_status()
-            return resp.json().get("Items", [])
+            while True:
+                params = {
+                    "ParentId": parent_id,
+                    "Recursive": "true",
+                    "IncludeItemTypes": "Movie,Episode,Audio",
+                    "Fields": "Path,MediaStreams,ProviderIds",
+                    "StartIndex": start_index,
+                    "Limit": limit,
+                }
+                if min_date_last_saved:
+                    params["MinDateLastSaved"] = min_date_last_saved
+                logger.info(f"[分页] 获取第 {start_index} - {start_index + limit} 条记录...")
+                logger.info(f"正在获取列表 [GET]: {url} | 参数: {params}")
+                resp = await client.get(url, headers=self.headers, params=params, timeout=60.0)
+                resp.raise_for_status()
+                items = resp.json().get("Items", [])
+                if not items:
+                    break
+                yield items
+                start_index += limit
 
     async def refresh_item(self, item_id: str):
         """
@@ -81,7 +88,7 @@ class EmbyClient:
         logger.debug(f"Refreshing item {item_id} via {url} with data: {data}")
         async with httpx.AsyncClient() as client:
             logger.info(f"触发探测 [POST]: {url} | 码率限制: {data.get('MaxStreamingBitrate')}")
-            resp = await client.post(url, headers=self.headers, json=data, timeout=60.0)
+            resp = await client.post(url, headers=self.headers, json=data, timeout=120.0)
             resp.raise_for_status()
             return True
 

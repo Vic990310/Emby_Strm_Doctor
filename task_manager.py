@@ -1,13 +1,15 @@
 import asyncio
 import logging
 import time
-from typing import List, Optional
+from typing import List, Optional, Set
 from fastapi import WebSocket
 import httpx
 from collections import deque
 import traceback
+import datetime
 from emby_client import EmbyClient
 from config import load_config
+from database import Database
 
 logger = logging.getLogger(__name__)
 
@@ -55,8 +57,9 @@ class TaskManager:
         self.current_library_id: Optional[str] = None
         self.stats = {"total": 0, "processed": 0, "success": 0}
         self.log_buffer = deque(maxlen=2000)
+        self.db = Database()
 
-    async def start_task(self, library_id: str):
+    async def start_task(self, library_id: str, force: bool = False):
         if self.is_running:
             return False, "Task already running"
         
@@ -64,7 +67,7 @@ class TaskManager:
         self.is_running = True
         self.current_library_id = library_id
         self.stats = {"total": 0, "processed": 0, "success": 0}
-        self.current_task = asyncio.create_task(self._process_library(library_id))
+        self.current_task = asyncio.create_task(self._process_library(library_id, force))
         return True, "Task started"
 
     async def stop_task(self):
@@ -76,9 +79,10 @@ class TaskManager:
             await self.current_task
         return True, "Task stopped"
 
-    async def _process_library(self, library_id: str):
+    async def _process_library(self, library_id: str, force: bool):
         config = load_config()
         client = EmbyClient(config.emby_host, config.api_key, config.user_id)
+        exclude_lines = [l.strip() for l in (config.exclude_paths or "").splitlines() if l.strip()]
         
         try:
             # 1. Identity Pre-check
@@ -96,42 +100,60 @@ class TaskManager:
             except Exception as e:
                 await manager.broadcast(f"[系统] 身份验证异常: {str(e)}")
                 return
-
-            await manager.broadcast("正在获取媒体库项目...")
-            all_items = await client.get_items(library_id)
-            
-            # Smart Filtering:
-            # 1. Must be .strm file
-            # 2. Must NOT have valid MediaStreams (if it has streams, it's already good)
+            last_sync = self.db.get_config("last_sync_time")
+            full_mode = force or (not last_sync)
+            if full_mode:
+                await manager.broadcast("[系统] 全量扫描模式")
+            else:
+                await manager.broadcast(f"[系统] 增量同步模式: 起始时间 {last_sync}")
+            scanned_ids: Set[str] = set()
             pending_items = []
             skipped_count = 0
-            
-            for item in all_items:
-                path = item.get('Path', '').lower()
-                media_streams = item.get('MediaStreams', [])
-                name = item.get('Name', 'Unknown')
-                
-                if not path.endswith('.strm'):
-                    continue
-                    
-                if media_streams and len(media_streams) > 0:
-                    skipped_count += 1
-                    logger.info(f"[跳过] {name} 已包含元数据")
-                    continue
-                    
-                pending_items.append(item)
-            
-            total_found = len(all_items)
+            total_found = 0
+            async for batch in client.get_items(library_id, None if full_mode else last_sync):
+                total_found += len(batch)
+                for item in batch:
+                    path = item.get("Path", "") or ""
+                    name = item.get("Name", "Unknown")
+                    item_id = item.get("Id")
+                    media_streams = item.get("MediaStreams", [])
+                    if full_mode and item_id:
+                        scanned_ids.add(item_id)
+                    p_lower = path.lower()
+                    if not p_lower.endswith(".strm"):
+                        continue
+                    if any(excl in p_lower for excl in exclude_lines):
+                        await manager.broadcast(f"[跳过] 黑名单: {name} -> {path}")
+                        if item_id:
+                            self.db.set_media_status(item_id, name, path, "ignored")
+                        continue
+                    if media_streams and len(media_streams) > 0:
+                        skipped_count += 1
+                        logger.info(f"[跳过] {name} 已包含元数据")
+                        if item_id:
+                            self.db.set_media_status(item_id, name, path, "ignored")
+                        continue
+                    # DB checks
+                    status_row = self.db.get_media_status(item_id) if item_id else None
+                    if status_row and status_row.get("status") == "success":
+                        continue
+                    if status_row and status_row.get("status") == "failed" and int(status_row.get("retry_count") or 0) >= 3 and (not force):
+                        continue
+                    pending_items.append(item)
             total_strm_todo = len(pending_items)
             self.stats["total"] = total_strm_todo
-            
             await manager.broadcast(f"扫描完成: 共发现 {total_found} 个项目。")
-            await manager.broadcast(f"智能过滤: {skipped_count} 个 .strm 文件已有媒体信息，无需修复。")
+            await manager.broadcast(f"智能过滤: {skipped_count} 个 .strm 文件已有媒体信息或被黑名单忽略。")
             await manager.broadcast(f"待修复队列: {total_strm_todo} 个文件。")
-            
             if total_strm_todo == 0:
-                 await manager.broadcast("所有 .strm 文件均正常，任务结束。")
-                 return
+                await manager.broadcast("所有 .strm 文件均正常或已忽略，任务结束。")
+                if full_mode:
+                    db_ids = set(self.db.get_all_ids())
+                    missing = list(db_ids - scanned_ids)
+                    removed = self.db.delete_ids(missing)
+                    await manager.broadcast(f"[清理] 发现 {removed} 个已删除项目，已从数据库移除")
+                self.db.set_config("last_sync_time", datetime.datetime.utcnow().isoformat() + "Z")
+                return
 
             # Apply batch size limit
             batch_size = config.batch_size
@@ -191,10 +213,12 @@ class TaskManager:
                         
                         logger.info(f"[成功] {name} 获取到信息: {res_str} {codec}{duration_str}")
                         self.stats["success"] += 1
+                        self.db.set_media_status(item_id, name, item.get("Path", ""), "success", f"{res_str} {codec}{duration_str}")
                             
                         await manager.broadcast(f"[{index + 1}/{total_strm_todo}] 成功: {name} ({res_str} {codec}{duration_str})")
                     else:
                         await manager.broadcast(f"[{index + 1}/{total_strm_todo}] 失败: {name} - Emby 无法读取文件头 (可能是坏链或网盘超时)")
+                        self.db.set_media_status(item_id, name, item.get("Path", ""), "failed", None, True)
                         
                 except httpx.HTTPStatusError as e:
                     if e.response.status_code in [403, 429]:
@@ -205,8 +229,10 @@ class TaskManager:
                         break
                     else:
                         await manager.broadcast(f"[{index + 1}/{total_strm_todo}] 失败: {name} (HTTP {e.response.status_code})")
+                        self.db.set_media_status(item_id, name, item.get("Path", ""), "failed", None, True)
                 except Exception as e:
                     await manager.broadcast(f"[{index + 1}/{total_strm_todo}] 异常: {name} ({str(e)})")
+                    self.db.set_media_status(item_id, name, item.get("Path", ""), "failed", None, True)
                 finally:
                     self.stats["processed"] += 1
 
@@ -223,6 +249,12 @@ class TaskManager:
             
             if not self.should_stop:
                 await manager.broadcast("任务完成！")
+                if full_mode:
+                    db_ids = set(self.db.get_all_ids())
+                    missing = list(db_ids - scanned_ids)
+                    removed = self.db.delete_ids(missing)
+                    await manager.broadcast(f"[清理] 发现 {removed} 个已删除项目，已从数据库移除")
+                self.db.set_config("last_sync_time", datetime.datetime.utcnow().isoformat() + "Z")
 
         except Exception as e:
             await manager.broadcast(f"系统错误: {str(e)}")

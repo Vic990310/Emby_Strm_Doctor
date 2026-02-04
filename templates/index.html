@@ -80,6 +80,11 @@
                             设置每次任务最多扫描的文件数，防止任务运行时间过长。
                         </p>
                     </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-300 mb-1">路径黑名单</label>
+                        <textarea id="exclude_paths" rows="4" placeholder="/mnt/user/115/\n/mnt/user/aliyun/" class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 focus:outline-none focus:border-emby text-white placeholder-gray-500"></textarea>
+                        <p class="text-xs text-gray-400 mt-1">一行一个路径。示例：/mnt/user/115/</p>
+                    </div>
                     <button type="submit" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded transition duration-200">
                         保存配置
                     </button>
@@ -102,6 +107,10 @@
                         </select>
                     </div>
                     <div class="flex gap-2 w-full sm:w-auto">
+                        <label class="flex items-center text-sm text-gray-300">
+                            <input type="checkbox" id="force_full" class="mr-2">
+                            强制全量扫描
+                        </label>
                         <button id="btn-refresh-libs" class="bg-gray-600 hover:bg-gray-500 text-white px-3 py-2 rounded" title="刷新列表">
                             🔄
                         </button>
@@ -123,6 +132,16 @@
                 </div>
                 <div id="log-container" class="flex-1 overflow-y-auto font-mono text-sm space-y-1 p-2 bg-gray-900 rounded border border-gray-700">
                     <div class="text-gray-500 italic">等待任务开始...</div>
+                </div>
+                <div class="grid grid-cols-2 gap-4 mt-4 text-sm">
+                    <div class="bg-gray-900 rounded p-3 border border-gray-700">
+                        <div class="text-gray-400">累计成功</div>
+                        <div id="stat-success" class="text-green-400 text-xl">0</div>
+                    </div>
+                    <div class="bg-gray-900 rounded p-3 border border-gray-700">
+                        <div class="text-gray-400">累计失败</div>
+                        <div id="stat-failed" class="text-red-400 text-xl">0</div>
+                    </div>
                 </div>
             </div>
 
@@ -160,6 +179,7 @@
                 document.getElementById('user_id').value = data.user_id;
                 document.getElementById('scan_interval').value = data.scan_interval;
                 document.getElementById('batch_size').value = data.batch_size || 0;
+                document.getElementById('exclude_paths').value = data.exclude_paths || '';
             } catch (e) {
                 console.error('Failed to load config', e);
             }
@@ -172,7 +192,8 @@
                 api_key: document.getElementById('api_key').value,
                 user_id: document.getElementById('user_id').value,
                 scan_interval: parseInt(document.getElementById('scan_interval').value),
-                batch_size: parseInt(document.getElementById('batch_size').value)
+                batch_size: parseInt(document.getElementById('batch_size').value),
+                exclude_paths: document.getElementById('exclude_paths').value
             };
             
             try {
@@ -225,12 +246,13 @@
         btnStart.addEventListener('click', async () => {
             const libraryId = librarySelect.value;
             if (!libraryId) return alert('请选择一个媒体库');
+            const force = document.getElementById('force_full').checked;
 
             try {
                 const res = await fetch(`${API_BASE}/start`, {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ library_id: libraryId })
+                    body: JSON.stringify({ library_id: libraryId, force })
                 });
                 const data = await res.json();
                 if (res.ok) {
@@ -281,6 +303,10 @@
                     }
                 } else {
                     setRunningState(false);
+                }
+                if (data.db_stats) {
+                    document.getElementById('stat-success').textContent = data.db_stats.success || 0;
+                    document.getElementById('stat-failed').textContent = data.db_stats.failed || 0;
                 }
             } catch (e) {
                 console.warn('Status fetch failed', e);
